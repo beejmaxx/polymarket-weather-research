@@ -61,6 +61,14 @@ KNOWN_LOCATIONS: dict[str, Location] = {
         longitude=-95.3698,
         timezone="America/Chicago",
     ),
+    "hong kong": Location(
+        name="Hong Kong",
+        region=None,
+        latitude=22.3193,
+        longitude=114.1694,
+        timezone="Asia/Hong_Kong",
+        country="HK",
+    ),
     "indianapolis": Location(
         name="Indianapolis",
         region="IN",
@@ -81,6 +89,14 @@ KNOWN_LOCATIONS: dict[str, Location] = {
         latitude=36.1716,
         longitude=-115.1391,
         timezone="America/Los_Angeles",
+    ),
+    "london": Location(
+        name="London",
+        region=None,
+        latitude=51.5074,
+        longitude=-0.1278,
+        timezone="Europe/London",
+        country="GB",
     ),
     "los angeles": Location(
         name="Los Angeles",
@@ -147,6 +163,14 @@ KNOWN_LOCATIONS: dict[str, Location] = {
         latitude=39.9526,
         longitude=-75.1652,
         timezone="America/New_York",
+    ),
+    "paris": Location(
+        name="Paris",
+        region=None,
+        latitude=48.8566,
+        longitude=2.3522,
+        timezone="Europe/Paris",
+        country="FR",
     ),
     "phoenix": Location(
         name="Phoenix",

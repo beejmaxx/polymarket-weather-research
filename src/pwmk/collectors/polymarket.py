@@ -8,8 +8,7 @@ from typing import Any
 import httpx
 
 from pwmk.models.domain import BookLevel, OrderBook, RawMarket
-
-WEATHER_KEYWORDS = ("weather", "temperature", "rain", "snow", "degrees", "°", "hotter", "colder")
+from pwmk.parsing.weather_market_parser import is_weather_candidate
 
 
 class PolymarketClient:
@@ -59,6 +58,32 @@ class PolymarketClient:
     async def fetch_weather_markets(self, limit: int = 200, offset: int = 0) -> list[RawMarket]:
         markets = await self.fetch_active_markets(limit=limit, offset=offset)
         return [market for market in markets if _looks_weather_market(market.title)]
+
+    async def fetch_weather_tagged_markets(self, limit: int = 100) -> list[RawMarket]:
+        params = {
+            "active": "true",
+            "closed": "false",
+            "limit": limit,
+            "offset": 0,
+            "tag_slug": "weather",
+        }
+        async with httpx.AsyncClient(timeout=self.timeout) as client:
+            response = await client.get(f"{self.gamma_base_url}/events", params=params)
+            response.raise_for_status()
+            payload = response.json()
+        events = payload if isinstance(payload, list) else payload.get("events", [])
+        markets: list[RawMarket] = []
+        for event in events:
+            raw_markets = event.get("markets", [])
+            if not isinstance(raw_markets, list):
+                continue
+            for raw_market in raw_markets:
+                if not isinstance(raw_market, dict):
+                    continue
+                raw = dict(raw_market)
+                raw.setdefault("events", [event])
+                markets.append(parse_raw_market(raw))
+        return markets
 
     async def fetch_order_book(self, token_id: str, outcome: str | None = None) -> OrderBook:
         async with httpx.AsyncClient(timeout=self.timeout) as client:
@@ -135,8 +160,7 @@ def _to_decimal(value: Any) -> Decimal | None:
 
 
 def _looks_weather_market(title: str) -> bool:
-    normalized = title.lower()
-    return any(keyword in normalized for keyword in WEATHER_KEYWORDS)
+    return is_weather_candidate(title)
 
 
 def _parse_timestamp(value: Any) -> datetime:

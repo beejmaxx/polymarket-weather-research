@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import re
+from dataclasses import dataclass
 from datetime import date
 from decimal import Decimal
 
@@ -49,6 +50,24 @@ PRECIP_RE = re.compile(
     r"(?P<threshold>\d+(?:\.\d+)?)\s*(?P<unit>inches|inch|in|mm|millimeters?)\b",
     re.IGNORECASE,
 )
+WEATHER_CANDIDATE_RE = re.compile(
+    r"(\bweather\b|\btemperatures?\b|\btemps?\b|\brain\b|\brainfall\b|"
+    r"\bprecip(?:itation)?\b|\bsnow\b|\bdegrees?\b|°|\bhurricanes?\b|"
+    r"\bstorms?\b|\bhottest\b|\bcoldest\b|\bhotter\b|\bcolder\b|"
+    r"\bhigh temperature\b|\blow temperature\b|\barctic sea ice\b)",
+    re.IGNORECASE,
+)
+
+
+@dataclass(frozen=True)
+class ParseAttempt:
+    title: str
+    spec: MarketSpec | None
+    reason: str
+
+    @property
+    def parsed(self) -> bool:
+        return self.spec is not None
 
 
 class WeatherMarketParser:
@@ -56,38 +75,55 @@ class WeatherMarketParser:
         self.reference_date = reference_date or date.today()
 
     def parse(self, title: str) -> MarketSpec | None:
+        return self.parse_with_reason(title).spec
+
+    def parse_with_reason(self, title: str) -> ParseAttempt:
         normalized = _normalize_title(title)
         if not _looks_weather_related(normalized):
-            return None
+            return ParseAttempt(title=title, spec=None, reason="not_weather_candidate")
 
         notes: list[str] = []
         confidence = Decimal("1.0")
 
         event_date = self._parse_date(normalized)
         if event_date is None:
-            return None
-
-        location = find_known_location(normalized)
-        city = location.name if location else _extract_city_fallback(title)
-        if not city:
-            return None
-        if location is None:
-            confidence -= Decimal("0.30")
-            notes.append("unknown_location_coordinates")
+            return ParseAttempt(title=title, spec=None, reason="missing_date")
 
         metric = _parse_metric(normalized)
         if metric is None:
+            if _is_unsupported_weather_type(normalized):
+                return ParseAttempt(title=title, spec=None, reason="unsupported_weather_type")
             confidence -= Decimal("0.20")
             metric = WeatherMetric.HIGH_TEMP
             notes.append("metric_inferred_high_temp")
 
+        location = find_known_location(normalized)
+        city = location.name if location else _extract_city_fallback(title)
+        if not city:
+            return ParseAttempt(title=title, spec=None, reason="missing_location")
+        if location is None:
+            confidence -= Decimal("0.30")
+            notes.append("unknown_location_coordinates")
+
         comparator = _parse_comparator(normalized)
         if comparator is None:
-            return None
+            comparator = _infer_comparator(normalized, metric)
+        if comparator is None:
+            return ParseAttempt(title=title, spec=None, reason="missing_comparator")
 
         threshold, unit = _parse_threshold(normalized, metric)
+        if (
+            threshold is None
+            and metric is WeatherMetric.PRECIP_SUM
+            and _asks_if_any_rain(normalized)
+        ):
+            threshold = Decimal("0")
+            unit = "inch"
+            comparator = Comparator.ABOVE
+            confidence -= Decimal("0.10")
+            notes.append("rain_threshold_inferred_any_amount")
         if threshold is None:
-            return None
+            return ParseAttempt(title=title, spec=None, reason="missing_threshold")
         if unit is None:
             unit = "F" if metric in {WeatherMetric.HIGH_TEMP, WeatherMetric.LOW_TEMP} else "inch"
             confidence -= Decimal("0.15")
@@ -106,7 +142,7 @@ class WeatherMarketParser:
             unit = "mm"
 
         confidence = max(Decimal("0"), min(confidence, Decimal("1")))
-        return MarketSpec(
+        spec = MarketSpec(
             title=title,
             city=city,
             event_date=event_date,
@@ -118,6 +154,7 @@ class WeatherMarketParser:
             confidence=confidence,
             notes=notes,
         )
+        return ParseAttempt(title=title, spec=spec, reason="parsed")
 
     def _parse_date(self, text: str) -> date | None:
         match = DATE_RE.search(text)
@@ -150,42 +187,74 @@ def _normalize_title(title: str) -> str:
 
 
 def _looks_weather_related(text: str) -> bool:
-    keywords = (
-        "temperature",
-        "temp",
-        "high",
-        "low",
-        "hotter",
-        "colder",
-        "rain",
-        "precip",
-        "snow",
-        "weather",
-        "degrees",
-        "°",
-    )
-    return any(keyword in text for keyword in keywords)
+    return is_weather_candidate(text)
+
+
+def is_weather_candidate(title: str) -> bool:
+    return WEATHER_CANDIDATE_RE.search(title) is not None
 
 
 def _parse_metric(text: str) -> WeatherMetric | None:
-    if any(token in text for token in ("rain", "precipitation", "precip")):
+    if re.search(r"\b(rain|rainfall|precip|precipitation)\b", text):
         return WeatherMetric.PRECIP_SUM
-    if any(token in text for token in (" low ", "minimum", "min temp", "overnight low", "colder")):
+    if any(
+        token in text
+        for token in (
+            " low ",
+            "low temperature",
+            "lowest temperature",
+            "minimum",
+            "min temp",
+            "overnight low",
+            "colder",
+        )
+    ):
         return WeatherMetric.LOW_TEMP
-    if any(token in text for token in (" high ", "maximum", "max temp", "hit", "reach", "hotter")):
+    if any(
+        token in text
+        for token in (
+            " high ",
+            "high temperature",
+            "highest temperature",
+            "maximum",
+            "max temp",
+            "hit",
+            "reach",
+            "hotter",
+            "degrees",
+            "°",
+        )
+    ):
         return WeatherMetric.HIGH_TEMP
     return None
 
 
+def _is_unsupported_weather_type(text: str) -> bool:
+    return (
+        re.search(
+            r"\b(hurricane|storm|sea ice|earthquake|volcano|meteor|disaster|landfall)\b", text
+        )
+        is not None
+    )
+
+
 def _parse_comparator(text: str) -> Comparator | None:
-    if any(token in text for token in ("or higher", "at least", "reach", "hit", "hotter")):
+    if any(
+        token in text for token in ("or higher", "or above", "at least", "reach", "hit", "hotter")
+    ):
         return Comparator.AT_OR_ABOVE
     if any(token in text for token in ("above", "over", "exceed", "greater than")):
         return Comparator.ABOVE
-    if any(token in text for token in ("or lower", "at most", "no more than")):
+    if any(token in text for token in ("or lower", "or below", "at most", "no more than")):
         return Comparator.AT_OR_BELOW
     if any(token in text for token in ("below", "under", "less than", "colder")):
         return Comparator.BELOW
+    return None
+
+
+def _infer_comparator(text: str, metric: WeatherMetric) -> Comparator | None:
+    if metric is WeatherMetric.PRECIP_SUM and _asks_if_any_rain(text):
+        return Comparator.ABOVE
     return None
 
 
@@ -206,6 +275,10 @@ def _parse_threshold(text: str, metric: WeatherMetric) -> tuple[Decimal | None, 
             return Decimal(match.group("threshold")), match.group("unit")
     match = matches[0]
     return Decimal(match.group("threshold")), match.group("unit")
+
+
+def _asks_if_any_rain(text: str) -> bool:
+    return re.search(r"\b(will|does|do|did|is)\b.*\brain\b", text) is not None
 
 
 def _extract_city_fallback(title: str) -> str | None:

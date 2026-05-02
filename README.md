@@ -75,9 +75,12 @@ pwmk weather parse-title "Will the high temperature in New York City be 75°F or
 Generate paper signals from active weather markets:
 
 ```bash
+pwmk weather audit-titles --limit 200 --source both
 pwmk weather scan --limit 200
 pwmk weather signals --limit 20
 ```
+
+`audit-titles` is the parser coverage workflow. It reports how many live weather-tagged or keyword-matched markets are currently supported, and gives concrete skip reasons such as `missing_date`, `missing_threshold`, or `unsupported_weather_type`.
 
 Fetch settlements for paper-traded markets once they close:
 

@@ -4,6 +4,7 @@ import argparse
 import asyncio
 import json
 import os
+from datetime import date
 from decimal import Decimal
 from pathlib import Path
 
@@ -12,7 +13,7 @@ from pwmk.collectors.polymarket import PolymarketClient
 from pwmk.config import db_path_from_env, weather_settings_from_env
 from pwmk.db.repository import Repository, init_db
 from pwmk.ingestion.pipeline import poll_loop, poll_once, stream_trades
-from pwmk.models.domain import PaperOrder
+from pwmk.models.domain import PaperOrder, RawMarket
 from pwmk.parsing.normalize import normalize_market, utc_now_iso
 from pwmk.parsing.weather_market_parser import WeatherMarketParser
 from pwmk.trading.risk import RiskLimits
@@ -70,9 +71,19 @@ def build_parser() -> argparse.ArgumentParser:
     parse_title = weather_subparsers.add_parser("parse-title", help="Parse a weather market title")
     parse_title.add_argument("title")
 
+    audit = weather_subparsers.add_parser(
+        "audit-titles", help="Audit weather title parser coverage"
+    )
+    audit.add_argument("--limit", type=int, default=200)
+    audit.add_argument("--offset", type=int, default=0)
+    audit.add_argument("--source", choices=["keyword", "weather-tag", "both"], default="both")
+    audit.add_argument("--examples", type=int, default=50)
+    audit.add_argument("--include-parsed", action="store_true")
+
     scan = weather_subparsers.add_parser("scan", help="Generate paper weather signals")
     scan.add_argument("--limit", type=int, default=200)
     scan.add_argument("--offset", type=int, default=0)
+    scan.add_argument("--source", choices=["keyword", "weather-tag", "both"], default="keyword")
     scan.add_argument("--min-confidence", type=Decimal, default=Decimal("0.70"))
     scan.add_argument("--min-edge", type=Decimal)
     scan.add_argument("--max-spread", type=Decimal)
@@ -115,7 +126,7 @@ async def _weather_scan(args: argparse.Namespace, db_path: Path) -> dict[str, ob
     weather = OpenMeteoClient(settings.open_meteo_ensemble_url, model=settings.open_meteo_model)
     parser = WeatherMarketParser()
     observed_at = utc_now_iso()
-    markets = await poly.fetch_weather_markets(limit=args.limit, offset=args.offset)
+    markets = await _fetch_weather_source_markets(poly, args.source, args.limit, args.offset)
 
     parsed = 0
     forecasted = 0
@@ -133,10 +144,11 @@ async def _weather_scan(args: argparse.Namespace, db_path: Path) -> dict[str, ob
         except ValueError:
             _bump(skipped, "normalize_failed")
 
-        spec = parser.parse(market.title)
-        if spec is None:
-            _bump(skipped, "parse_failed")
+        attempt = parser.parse_with_reason(market.title)
+        if attempt.spec is None:
+            _bump(skipped, attempt.reason)
             continue
+        spec = attempt.spec
         if spec.location is None:
             _bump(skipped, "unknown_location")
             continue
@@ -145,6 +157,9 @@ async def _weather_scan(args: argparse.Namespace, db_path: Path) -> dict[str, ob
             continue
         repo.save_weather_market_spec(condition_id, spec)
         parsed += 1
+        if spec.event_date < date.today():
+            _bump(skipped, "stale_event_date")
+            continue
 
         yes_token = market.token_for_outcome("Yes")
         no_token = market.token_for_outcome("No")
@@ -154,13 +169,18 @@ async def _weather_scan(args: argparse.Namespace, db_path: Path) -> dict[str, ob
 
         try:
             forecast = await weather.fetch_forecast(spec, market_id=condition_id)
+        except Exception:
+            _bump(skipped, "forecast_fetch_failed")
+            continue
+        repo.save_weather_forecast(condition_id, forecast)
+
+        try:
             yes_book = await poly.fetch_order_book(yes_token, outcome="Yes")
             no_book = await poly.fetch_order_book(no_token, outcome="No") if no_token else None
         except Exception:
-            _bump(skipped, "external_fetch_failed")
+            _bump(skipped, "order_book_fetch_failed")
             continue
 
-        repo.save_weather_forecast(condition_id, forecast)
         repo.save_weather_order_book(condition_id, yes_book)
         if no_book:
             repo.save_weather_order_book(condition_id, no_book)
@@ -205,6 +225,65 @@ async def _weather_scan(args: argparse.Namespace, db_path: Path) -> dict[str, ob
     }
 
 
+async def _weather_audit_titles(args: argparse.Namespace, db_path: Path) -> dict[str, object]:
+    init_db(db_path)
+    repo = Repository(db_path)
+    settings = weather_settings_from_env()
+    poly = PolymarketClient(settings.gamma_base_url, settings.clob_base_url)
+    parser = WeatherMarketParser()
+    observed_at = utc_now_iso()
+    markets = await _fetch_weather_source_markets(poly, args.source, args.limit, args.offset)
+
+    parsed = 0
+    reasons: dict[str, int] = {}
+    examples: list[dict[str, object]] = []
+    for market in markets:
+        if market.raw:
+            try:
+                repo.save_market_bundle([normalize_market(market.raw, observed_at=observed_at)])
+            except ValueError:
+                pass
+
+        attempt = parser.parse_with_reason(market.title)
+        _bump(reasons, attempt.reason)
+        if attempt.parsed:
+            parsed += 1
+        if len(examples) >= args.examples:
+            continue
+        if attempt.parsed and not args.include_parsed:
+            continue
+
+        item: dict[str, object] = {
+            "condition_id": market.condition_id,
+            "title": market.title,
+            "parsed": attempt.parsed,
+            "reason": attempt.reason,
+        }
+        if attempt.spec:
+            item.update(
+                {
+                    "city": attempt.spec.city,
+                    "event_date": attempt.spec.event_date.isoformat(),
+                    "metric": attempt.spec.metric.value,
+                    "comparator": attempt.spec.comparator.value,
+                    "threshold": str(attempt.spec.threshold),
+                    "unit": attempt.spec.unit,
+                    "confidence": str(attempt.spec.confidence),
+                    "notes": attempt.spec.notes,
+                }
+            )
+        examples.append(item)
+
+    return {
+        "source": args.source,
+        "markets_seen": len(markets),
+        "parsed": parsed,
+        "unparsed": len(markets) - parsed,
+        "reasons": reasons,
+        "examples": examples,
+    }
+
+
 async def _weather_sync_settlements(args: argparse.Namespace, db_path: Path) -> dict[str, object]:
     init_db(db_path)
     repo = Repository(db_path)
@@ -241,6 +320,29 @@ async def _weather_sync_settlements(args: argparse.Namespace, db_path: Path) -> 
         "settlements_saved": saved,
         "ambiguous_or_unresolved": ambiguous,
     }
+
+
+async def _fetch_weather_source_markets(
+    poly: PolymarketClient, source: str, limit: int, offset: int = 0
+) -> list[RawMarket]:
+    markets = []
+    if source in {"keyword", "both"}:
+        markets.extend(await poly.fetch_weather_markets(limit=limit, offset=offset))
+    if source in {"weather-tag", "both"}:
+        markets.extend(await poly.fetch_weather_tagged_markets(limit=limit))
+    return _dedupe_markets(markets)
+
+
+def _dedupe_markets(markets: list[RawMarket]) -> list[RawMarket]:
+    seen: set[str] = set()
+    deduped = []
+    for market in markets:
+        key = market.condition_id or market.market_id
+        if key in seen:
+            continue
+        seen.add(key)
+        deduped.append(market)
+    return deduped
 
 
 def _bump(counts: dict[str, int], key: str) -> None:
@@ -324,6 +426,10 @@ def main(argv: list[str] | None = None) -> None:
 
         if args.weather_command == "scan":
             _print_json(asyncio.run(_weather_scan(args, db_path)))
+            return
+
+        if args.weather_command == "audit-titles":
+            _print_json(asyncio.run(_weather_audit_titles(args, db_path)))
             return
 
         if args.weather_command == "signals":
