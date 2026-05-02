@@ -26,6 +26,22 @@ CREATE TABLE IF NOT EXISTS markets (
   UNIQUE(source, condition_id)
 );
 
+CREATE TABLE IF NOT EXISTS events (
+  source TEXT NOT NULL,
+  event_id TEXT NOT NULL,
+  event_slug TEXT,
+  title TEXT,
+  category TEXT,
+  image_url TEXT,
+  icon_url TEXT,
+  active INTEGER,
+  closed INTEGER,
+  first_seen_at TEXT NOT NULL,
+  last_seen_at TEXT NOT NULL,
+  raw_json TEXT,
+  PRIMARY KEY(source, event_id)
+);
+
 CREATE TABLE IF NOT EXISTS market_tokens (
   source TEXT NOT NULL,
   condition_id TEXT NOT NULL,
@@ -35,6 +51,17 @@ CREATE TABLE IF NOT EXISTS market_tokens (
   outcome_price REAL,
   updated_at TEXT NOT NULL,
   PRIMARY KEY(source, token_id)
+);
+
+CREATE TABLE IF NOT EXISTS market_outcomes (
+  source TEXT NOT NULL,
+  condition_id TEXT NOT NULL,
+  outcome_index INTEGER NOT NULL,
+  outcome TEXT,
+  token_id TEXT,
+  latest_price REAL,
+  updated_at TEXT NOT NULL,
+  PRIMARY KEY(source, condition_id, outcome_index)
 );
 
 CREATE TABLE IF NOT EXISTS market_snapshots (
@@ -84,6 +111,54 @@ CREATE TABLE IF NOT EXISTS trades (
   transaction_hash TEXT,
   raw_json TEXT,
   UNIQUE(source, trade_key)
+);
+
+CREATE TABLE IF NOT EXISTS market_volume_aggregates (
+  source TEXT NOT NULL,
+  condition_id TEXT NOT NULL,
+  bucket_size TEXT NOT NULL,
+  bucket_start TEXT NOT NULL,
+  snapshot_count INTEGER NOT NULL,
+  volume_total_open REAL,
+  volume_total_close REAL,
+  volume_total_delta REAL,
+  volume_24h_last REAL,
+  liquidity_last REAL,
+  trade_count INTEGER NOT NULL DEFAULT 0,
+  trade_notional REAL NOT NULL DEFAULT 0,
+  updated_at TEXT NOT NULL,
+  PRIMARY KEY(source, condition_id, bucket_size, bucket_start)
+);
+
+CREATE TABLE IF NOT EXISTS alerts (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  source TEXT NOT NULL,
+  alert_type TEXT NOT NULL,
+  severity TEXT NOT NULL,
+  condition_id TEXT,
+  event_id TEXT,
+  title TEXT,
+  message TEXT NOT NULL,
+  metric_value REAL,
+  threshold_value REAL,
+  status TEXT NOT NULL,
+  dedupe_key TEXT NOT NULL,
+  created_at TEXT NOT NULL,
+  delivered_at TEXT,
+  raw_json TEXT,
+  UNIQUE(source, dedupe_key)
+);
+
+CREATE TABLE IF NOT EXISTS data_quality_issues (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  source TEXT NOT NULL,
+  issue_type TEXT NOT NULL,
+  severity TEXT NOT NULL,
+  condition_id TEXT,
+  event_id TEXT,
+  message TEXT NOT NULL,
+  created_at TEXT NOT NULL,
+  raw_json TEXT
 );
 
 CREATE TABLE IF NOT EXISTS ingestion_runs (
@@ -188,12 +263,19 @@ CREATE TABLE IF NOT EXISTS market_settlements (
 
 CREATE INDEX IF NOT EXISTS idx_markets_condition_id ON markets(condition_id);
 CREATE INDEX IF NOT EXISTS idx_markets_event_id ON markets(event_id);
+CREATE INDEX IF NOT EXISTS idx_events_slug ON events(event_slug);
 CREATE INDEX IF NOT EXISTS idx_market_snapshots_condition_observed
   ON market_snapshots(condition_id, observed_at);
 CREATE INDEX IF NOT EXISTS idx_event_volume_event_observed
   ON event_volume_snapshots(event_id, observed_at);
 CREATE INDEX IF NOT EXISTS idx_trades_condition_ts ON trades(condition_id, trade_ts);
 CREATE INDEX IF NOT EXISTS idx_trades_observed_at ON trades(observed_at);
+CREATE INDEX IF NOT EXISTS idx_market_volume_aggregates_bucket
+  ON market_volume_aggregates(bucket_size, bucket_start);
+CREATE INDEX IF NOT EXISTS idx_alerts_status_created
+  ON alerts(status, created_at);
+CREATE INDEX IF NOT EXISTS idx_data_quality_created
+  ON data_quality_issues(created_at);
 CREATE INDEX IF NOT EXISTS idx_weather_signals_condition_created
   ON weather_signals(condition_id, created_at);
 CREATE INDEX IF NOT EXISTS idx_weather_paper_orders_condition

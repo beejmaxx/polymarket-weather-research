@@ -20,6 +20,9 @@ dev = [
   "pytest>=8.0",
   "ruff>=0.5",
 ]
+parquet = [
+  "pyarrow>=16",
+]
 
 [project.scripts]
 pwmk = "pwmk.cli.main:main"
@@ -29,6 +32,7 @@ where = ["src"]
 
 [tool.setuptools.package-data]
 "pwmk.api" = ["static/*"]
+"pwmk.db" = ["schema.sql"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
@@ -36,4 +40,3 @@ testpaths = ["tests"]
 [tool.ruff]
 line-length = 100
 src = ["src", "tests"]
-

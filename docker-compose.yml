@@ -1,0 +1,18 @@
+services:
+  app:
+    build: .
+    ports:
+      - "8000:8000"
+    env_file:
+      - .env
+    environment:
+      PWMK_DB_PATH: /data/pwmk.sqlite
+      PWMK_ENABLE_SCHEDULER: "true"
+      PWMK_ENABLE_STREAM: "false"
+    volumes:
+      - pwmk-data:/data
+    restart: unless-stopped
+
+volumes:
+  pwmk-data:
+

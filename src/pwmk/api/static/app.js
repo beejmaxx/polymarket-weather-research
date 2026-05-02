@@ -1,6 +1,7 @@
 const state = {
   selectedConditionId: null,
   markets: [],
+  apiToken: localStorage.getItem("pwmkApiToken") || "",
 };
 
 const fmtUsd = new Intl.NumberFormat("en-US", {
@@ -24,7 +25,9 @@ function shortId(value) {
 }
 
 async function getJson(url, options = {}) {
-  const response = await fetch(url, options);
+  const headers = new Headers(options.headers || {});
+  if (state.apiToken) headers.set("X-API-Key", state.apiToken);
+  const response = await fetch(url, { ...options, headers });
   if (!response.ok) {
     const text = await response.text();
     throw new Error(text || response.statusText);
@@ -42,8 +45,21 @@ async function loadSummary() {
   document.getElementById("metric-volume-total").textContent = money(summary.active_volume_total);
   document.getElementById("metric-liquidity").textContent = money(summary.active_liquidity);
   document.getElementById("metric-markets").textContent = fmtNum.format(summary.active_markets || 0);
+  document.getElementById("metric-events").textContent = fmtNum.format(summary.events_total || 0);
+  document.getElementById("metric-alerts").textContent = fmtNum.format(summary.pending_alerts || 0);
   const lastRun = summary.last_run ? `${summary.last_run.mode}: ${summary.last_run.status}` : "idle";
   setStatus(`Snapshot ${summary.latest_snapshot_at || "-"} | ${lastRun}`);
+}
+
+async function loadOps() {
+  const [scheduler, momentum, alerts] = await Promise.all([
+    getJson("/api/scheduler"),
+    getJson("/api/momentum?limit=5"),
+    getJson("/api/alerts?limit=5"),
+  ]);
+  renderScheduler(scheduler);
+  renderMomentum(momentum);
+  renderAlerts(alerts);
 }
 
 async function loadMarkets() {
@@ -84,10 +100,63 @@ async function selectMarket(conditionId) {
   renderMarkets();
   const [detail, series] = await Promise.all([
     getJson(`/api/markets/${conditionId}`),
-    getJson(`/api/markets/${conditionId}/volume?hours=168`),
+    getJson(`/api/markets/${conditionId}/aggregates?bucket_size=hour&hours=168`),
   ]);
   renderDetail(detail);
   drawChart(series);
+}
+
+function renderScheduler(scheduler) {
+  const target = document.getElementById("scheduler-status");
+  const tasks = scheduler.tasks && scheduler.tasks.length ? scheduler.tasks.join(", ") : "none";
+  target.innerHTML = `
+    <div><strong>${scheduler.enabled ? "enabled" : "manual"}</strong></div>
+    <div>tasks: ${escapeHtml(tasks)}</div>
+    <div>poll: ${scheduler.poll_limit} every ${scheduler.poll_interval_seconds}s</div>
+    <div>stream: ${scheduler.stream_enabled ? "enabled" : "disabled"}</div>
+  `;
+}
+
+function renderMomentum(rows) {
+  const target = document.getElementById("momentum-list");
+  if (!rows.length) {
+    target.innerHTML = "Need at least two snapshots for momentum.";
+    return;
+  }
+  target.innerHTML = rows
+    .map(
+      (row) => `
+        <div class="ops-item">
+          <div>
+            <strong>${escapeHtml(row.question || "-")}</strong>
+            <span>${money(row.previous_volume_24h)} to ${money(row.volume_24h)}</span>
+          </div>
+          <div class="number">${money(row.volume_24h_change)}</div>
+        </div>
+      `
+    )
+    .join("");
+}
+
+function renderAlerts(alerts) {
+  const target = document.getElementById("alerts-list");
+  if (!alerts.length) {
+    target.innerHTML = "No alerts.";
+    return;
+  }
+  target.innerHTML = alerts
+    .map(
+      (alert) => `
+        <div class="ops-item">
+          <div>
+            <strong>${escapeHtml(alert.title || alert.alert_type)}</strong>
+            <span>${escapeHtml(alert.message)}</span>
+          </div>
+          <div>${escapeHtml(alert.severity)}</div>
+        </div>
+      `
+    )
+    .join("");
 }
 
 function renderDetail(market) {
@@ -153,7 +222,9 @@ function drawChart(series) {
     return;
   }
 
-  const values = series.map((point) => Number(point.volume_24h || 0));
+  const values = series.map((point) =>
+    Number(point.volume_24h_last ?? point.volume_24h ?? point.volume_total_delta ?? 0)
+  );
   const min = Math.min(...values);
   const max = Math.max(...values);
   const span = max - min || 1;
@@ -202,7 +273,21 @@ function escapeHtml(value) {
 }
 
 async function refreshAll() {
-  await Promise.all([loadSummary(), loadMarkets()]);
+  await Promise.all([loadSummary(), loadMarkets(), loadOps()]);
+}
+
+function setupApiToken() {
+  const input = document.getElementById("api-token");
+  input.value = state.apiToken;
+  input.addEventListener("change", () => {
+    state.apiToken = input.value.trim();
+    if (state.apiToken) localStorage.setItem("pwmkApiToken", state.apiToken);
+    else localStorage.removeItem("pwmkApiToken");
+    refreshAll().catch((error) => {
+      console.error(error);
+      setStatus("Dashboard error");
+    });
+  });
 }
 
 document.getElementById("refresh-button").addEventListener("click", async () => {
@@ -223,6 +308,7 @@ document.getElementById("ingest-button").addEventListener("click", async (event)
 
 document.getElementById("search").addEventListener("input", debounce(loadMarkets, 250));
 document.getElementById("sort").addEventListener("change", loadMarkets);
+setupApiToken();
 
 function debounce(fn, delay) {
   let timer = null;
@@ -236,4 +322,3 @@ refreshAll().catch((error) => {
   console.error(error);
   setStatus("Dashboard error");
 });
-

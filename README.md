@@ -1,6 +1,6 @@
 # Prediction Market Volume Layer
 
-MVP for ingesting and normalizing Polymarket market and volume data into SQLite, then exposing it through a small FastAPI API and internal dashboard.
+Production-ready MVP for ingesting and normalizing Polymarket market and volume data into SQLite, then exposing it through a FastAPI API and internal dashboard.
 
 It also includes a weather-market research loop: parse weather titles, fetch ensemble forecasts, create paper signals, ingest resolved outcomes, and report calibration/P&L before any live trading code exists.
 
@@ -13,6 +13,11 @@ It also includes a weather-market research loop: parse weather titles, fetch ens
 - `trades`: observed WebSocket trade prints from the public CLOB market stream
 - `weather_*`: weather parser specs, ensemble forecasts, paper signals, paper orders
 - `market_settlements`: inferred resolved outcomes from closed Gamma markets
+- `events`: normalized event metadata
+- `market_outcomes`: normalized outcome rows mapped to token IDs
+- `market_volume_aggregates`: hourly/daily rollups
+- `alerts`: stale ingestion and volume spike alerts
+- `data_quality_issues`: payload quality and schema drift warnings
 - Dashboard at `/` and JSON API under `/api/*`
 
 The implementation uses the current public Polymarket API split:
@@ -50,10 +55,34 @@ Run continuous polling:
 pwmk ingest loop --limit 200 --interval 60
 ```
 
+Run the dashboard with the built-in scheduler:
+
+```bash
+pwmk serve --host 127.0.0.1 --port 8000 --scheduler --poll-limit 200 --poll-interval 60
+```
+
 Record public CLOB trade prints for the top token IDs already in the database:
 
 ```bash
 pwmk ingest stream --asset-limit 50 --duration 300
+```
+
+Run reconnecting stream windows:
+
+```bash
+pwmk ingest stream-loop --asset-limit 200 --window-seconds 300
+```
+
+Backfill active and closed market snapshots:
+
+```bash
+pwmk ingest backfill --active-limit 1000 --closed-limit 1000
+```
+
+Refresh aggregates and alert checks:
+
+```bash
+pwmk maintenance
 ```
 
 Start the dashboard:
@@ -103,11 +132,51 @@ pwmk weather calibration
 ## Useful API Routes
 
 - `GET /api/summary`
+- `GET /api/scheduler`
+- `GET /api/events?limit=50`
 - `GET /api/markets?limit=50&search=bitcoin`
 - `GET /api/markets/{condition_id}`
 - `GET /api/markets/{condition_id}/volume?hours=24`
+- `GET /api/markets/{condition_id}/aggregates?bucket_size=hour&hours=168`
+- `GET /api/momentum?limit=25`
 - `GET /api/trades?limit=50`
+- `GET /api/alerts?status=pending`
+- `GET /api/data-quality`
 - `GET /api/weather/signals?limit=50`
 - `GET /api/weather/settlements?limit=50`
 - `GET /api/weather/calibration`
+- `GET /api/export/markets.csv?limit=1000`
 - `POST /api/ingest/poll?limit=100`
+- `POST /api/ingest/backfill?active_limit=1000&closed_limit=1000`
+- `POST /api/maintenance`
+
+## Production Controls
+
+Copy `.env.example` to `.env` and set:
+
+```dotenv
+PWMK_API_TOKEN=replace-me
+PWMK_ENABLE_SCHEDULER=true
+PWMK_ENABLE_STREAM=true
+PWMK_ALERT_WEBHOOK_URL=
+```
+
+When `PWMK_API_TOKEN` is set, API routes require `X-API-Key` or `Authorization: Bearer`.
+
+CSV and JSON exports work with the base install. Parquet export is available from the CLI with:
+
+```bash
+pip install -e ".[parquet]"
+pwmk export-markets --format parquet --output markets.parquet
+```
+
+## Deployment
+
+Docker Compose:
+
+```bash
+cp .env.example .env
+docker compose up --build -d
+```
+
+Systemd and operating docs are in `docs/DEPLOYMENT.md` and `docs/RUNBOOK.md`.

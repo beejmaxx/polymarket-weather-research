@@ -12,7 +12,14 @@ from pwmk.collectors.open_meteo import OpenMeteoClient
 from pwmk.collectors.polymarket import PolymarketClient
 from pwmk.config import db_path_from_env, weather_settings_from_env
 from pwmk.db.repository import Repository, init_db
-from pwmk.ingestion.pipeline import poll_loop, poll_once, stream_trades
+from pwmk.ingestion.pipeline import (
+    backfill_markets,
+    poll_loop,
+    poll_once,
+    run_maintenance,
+    stream_loop,
+    stream_trades,
+)
 from pwmk.models.domain import PaperOrder, RawMarket
 from pwmk.parsing.normalize import normalize_market, utc_now_iso
 from pwmk.parsing.weather_market_parser import WeatherMarketParser
@@ -42,9 +49,21 @@ def build_parser() -> argparse.ArgumentParser:
     serve.add_argument("--host", default="127.0.0.1")
     serve.add_argument("--port", type=int, default=8000)
     serve.add_argument("--reload", action="store_true")
+    serve.add_argument("--scheduler", action="store_true", help="Run polling inside the API process")
+    serve.add_argument("--stream", action="store_true", help="Run the CLOB stream inside the API process")
+    serve.add_argument("--poll-limit", type=int)
+    serve.add_argument("--poll-interval", type=int)
+    serve.add_argument("--api-token")
 
     export = subparsers.add_parser("export-markets", help="Print normalized markets as JSON")
     export.add_argument("--limit", type=int, default=1000)
+    export.add_argument("--format", choices=["json", "csv", "parquet"], default="json")
+    export.add_argument("--output", help="Required when --format parquet")
+
+    export_trades = subparsers.add_parser("export-trades", help="Print observed trades as CSV")
+    export_trades.add_argument("--limit", type=int, default=1000)
+
+    subparsers.add_parser("maintenance", help="Refresh aggregates and run alert checks")
 
     ingest = subparsers.add_parser("ingest", help="Run ingestion tasks")
     ingest_subparsers = ingest.add_subparsers(dest="ingest_command", required=True)
@@ -64,6 +83,21 @@ def build_parser() -> argparse.ArgumentParser:
     stream.add_argument("--asset-limit", type=int, default=50)
     stream.add_argument("--duration", type=int)
     stream.add_argument("--bootstrap-limit", type=int, default=100)
+
+    stream_forever = ingest_subparsers.add_parser(
+        "stream-loop", help="Run reconnecting CLOB trade stream windows"
+    )
+    stream_forever.add_argument("--asset-limit", type=int, default=100)
+    stream_forever.add_argument("--window-seconds", type=int, default=300)
+    stream_forever.add_argument("--restart-delay", type=int, default=5)
+    stream_forever.add_argument("--bootstrap-limit", type=int, default=200)
+
+    backfill = ingest_subparsers.add_parser(
+        "backfill", help="Backfill active and closed market snapshots"
+    )
+    backfill.add_argument("--active-limit", type=int, default=1000)
+    backfill.add_argument("--closed-limit", type=int, default=1000)
+    backfill.add_argument("--page-size", type=int, default=500)
 
     weather = subparsers.add_parser("weather", help="Run weather-market research workflows")
     weather_subparsers = weather.add_subparsers(dest="weather_command", required=True)
@@ -361,11 +395,38 @@ def main(argv: list[str] | None = None) -> None:
 
     if args.command == "export-markets":
         init_db(db_path)
-        print(Repository(db_path).export_markets_json(limit=args.limit))
+        repo = Repository(db_path)
+        if args.format == "parquet":
+            if not args.output:
+                parser.error("export-markets --format parquet requires --output")
+            repo.export_markets_parquet(args.output, limit=args.limit)
+        elif args.format == "csv":
+            print(repo.export_markets_csv(limit=args.limit), end="")
+        else:
+            print(repo.export_markets_json(limit=args.limit))
+        return
+
+    if args.command == "export-trades":
+        init_db(db_path)
+        print(Repository(db_path).export_trades_csv(limit=args.limit), end="")
+        return
+
+    if args.command == "maintenance":
+        _print_json(asyncio.run(run_maintenance(db_path)))
         return
 
     if args.command == "serve":
         os.environ["PWMK_DB_PATH"] = str(db_path)
+        if args.scheduler:
+            os.environ["PWMK_ENABLE_SCHEDULER"] = "1"
+        if args.stream:
+            os.environ["PWMK_ENABLE_STREAM"] = "1"
+        if args.poll_limit is not None:
+            os.environ["PWMK_POLL_LIMIT"] = str(args.poll_limit)
+        if args.poll_interval is not None:
+            os.environ["PWMK_POLL_INTERVAL_SECONDS"] = str(args.poll_interval)
+        if args.api_token:
+            os.environ["PWMK_API_TOKEN"] = args.api_token
         init_db(db_path)
         import uvicorn
 
@@ -413,6 +474,31 @@ def main(argv: list[str] | None = None) -> None:
                 )
             )
             _print_json(result.as_dict())
+            return
+
+        if args.ingest_command == "stream-loop":
+            asyncio.run(
+                stream_loop(
+                    db_path,
+                    asset_limit=args.asset_limit,
+                    window_seconds=args.window_seconds,
+                    restart_delay_seconds=args.restart_delay,
+                    bootstrap_limit=args.bootstrap_limit,
+                )
+            )
+            return
+
+        if args.ingest_command == "backfill":
+            _print_json(
+                asyncio.run(
+                    backfill_markets(
+                        db_path,
+                        active_limit=args.active_limit,
+                        closed_limit=args.closed_limit,
+                        page_size=args.page_size,
+                    )
+                )
+            )
             return
 
     if args.command == "weather":

@@ -1,0 +1,18 @@
+[Unit]
+Description=Prediction Market Volume Layer
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=/opt/polymarket-weather-research
+EnvironmentFile=/opt/polymarket-weather-research/.env
+ExecStart=/opt/polymarket-weather-research/.venv/bin/pwmk serve --host 0.0.0.0 --port 8000
+Restart=always
+RestartSec=5
+User=pwmk
+Group=pwmk
+
+[Install]
+WantedBy=multi-user.target
+
