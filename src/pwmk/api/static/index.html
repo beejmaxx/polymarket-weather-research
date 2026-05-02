@@ -1,0 +1,80 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Prediction Market Volume</title>
+    <link rel="stylesheet" href="/static/styles.css" />
+  </head>
+  <body>
+    <main class="shell">
+      <header class="topbar">
+        <div>
+          <h1>Prediction Market Volume</h1>
+          <p id="snapshot-status">Loading</p>
+        </div>
+        <div class="actions">
+          <button id="ingest-button" type="button">Ingest</button>
+          <button id="refresh-button" type="button">Refresh</button>
+        </div>
+      </header>
+
+      <section class="metrics" aria-label="Summary">
+        <article>
+          <span>24h Volume</span>
+          <strong id="metric-volume-24h">-</strong>
+        </article>
+        <article>
+          <span>Total Volume</span>
+          <strong id="metric-volume-total">-</strong>
+        </article>
+        <article>
+          <span>Liquidity</span>
+          <strong id="metric-liquidity">-</strong>
+        </article>
+        <article>
+          <span>Active Markets</span>
+          <strong id="metric-markets">-</strong>
+        </article>
+      </section>
+
+      <section class="workspace">
+        <div class="market-panel">
+          <div class="toolbar">
+            <input id="search" type="search" placeholder="Search markets" />
+            <select id="sort">
+              <option value="volume24h">24h volume</option>
+              <option value="volumeTotal">Total volume</option>
+              <option value="liquidity">Liquidity</option>
+              <option value="updated">Updated</option>
+            </select>
+          </div>
+          <div class="table-wrap">
+            <table>
+              <thead>
+                <tr>
+                  <th>Market</th>
+                  <th>24h</th>
+                  <th>Total</th>
+                  <th>Liquidity</th>
+                </tr>
+              </thead>
+              <tbody id="markets-body"></tbody>
+            </table>
+          </div>
+        </div>
+
+        <aside class="detail-panel">
+          <div id="market-detail" class="detail-empty">Select a market</div>
+          <canvas id="volume-chart" width="720" height="260"></canvas>
+          <div class="trades">
+            <h2>Recent Trades</h2>
+            <div id="trades-list"></div>
+          </div>
+        </aside>
+      </section>
+    </main>
+    <script src="/static/app.js"></script>
+  </body>
+</html>
+
